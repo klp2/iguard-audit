@@ -1,0 +1,110 @@
+#!/usr/bin/perl
+
+use 5.10.0;
+use strictures 2;
+
+use Config::Tiny;
+use Email::Sender::Simple qw(try_to_sendmail);
+use Email::Sender::Transport::SMTP;
+use Email::Simple;
+use Email::Simple::Creator;
+use Getopt::Args;
+use Iguard::Audit;
+
+arg config => (
+    isa      => 'Str',
+    required => 1,
+    comment  => 'path/to/configfile.conf'
+);
+
+opt to => (
+    isa     => 'Str',
+    comment => 'comma-seperated listed of email addresses to send report to',
+);
+
+opt from => (
+    isa     => 'Str',
+    comment => 'sent From: header to this',
+);
+
+opt subject => (
+    isa     => 'Str',
+    comment => 'subject of report email',
+);
+
+opt smtphost => (
+    isa     => 'Str',
+    comment => 'host to utilize for smtp'
+);
+
+opt smtpport => (
+    isa     => 'Int',
+    comment => 'smtp port if not 25'
+);
+
+my $opts = optargs;
+
+my $config = Config::Tiny->new;
+$config = Config::Tiny->read( $opts->{config} );
+
+die "No time period set in config" unless
+    my $period = $config->{_}{period};
+
+# trailing white space happens sometimes, so we'll clean it up
+# preceding white space might be a sign of a bigger problem
+# it will cause things to die eventually, but maybe we should
+# just fail right now if we see that ...
+chomp $period;
+$period =~ s/\s+/\+/;
+
+my @ips = keys %{$config->{ips}};
+my @ids = keys %{$config->{ids}};
+
+my @urls;
+
+foreach my $ip (@ips) {
+    foreach my $id (@ids) {
+        my %params = (
+            ip  => $ip,
+            id => $id, 
+            period => $period,
+        );
+        push @urls, build_url(\%params);
+    }
+}
+
+my @user_entries;
+foreach my $url (@urls) {
+    push @user_entries, get_entries($url);
+}
+
+my $report;
+foreach my $entry_list (@user_entries) {
+    $report .= clean_entries($entry_list) || '';
+}
+
+
+my $mail = Email::Simple->create(
+    header => [
+        To      => $opts->{to}      || $config->{mail}{to},
+        From    => $opts->{from}    || $config->{mail}{from},
+        Subject => $opts->{subject} || $config->{mail}{subject},
+    ],
+    body => $report,
+);
+
+# guessing the transport can take a long time
+# so we'll try to be more specific
+if (my $smtphost = ($opts->{smtphost} || $config->{smtphost})) {
+    my $transport = Email::Sender::Transport::SMTP->new(
+        {
+            host => $smtphost,
+            port => $opts->{smptport} || $config->{smtpport} || 25,
+        }
+    );
+    try_to_sendmail($mail, { transport => $transport })
+        or warn "Message wasn't sent: $_";
+} else {
+    try_to_sendmail($mail)
+        or warn "Message wasn't sent: $_";
+}
